@@ -9,14 +9,18 @@ import hinted_handoff
 
 class FakeAsyncClient:
     # shared call log to make assertions easier even if instances differ
+    # class level
     calls = []
 
     def __init__(self, fail_targets=None, record=None):
         self.fail_targets = set(fail_targets or [])
 
+    # This method is called when execution enters the async with block.
     async def __aenter__(self):
         return self
 
+    # This method is called when execution leaves the async with block, 
+    # whether it finished normally or raised an exception.
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
@@ -27,11 +31,30 @@ class FakeAsyncClient:
         if target in self.fail_targets:
             raise Exception('network failure')
         class R:
+            """
+            Mock HTTP response object for testing purposes.
+
+            Represents a successful HTTP response with status code 200 (OK).
+            Used to simulate server responses in unit tests without making actual network requests.
+            """
             status_code = 200
         return R()
 
 
 def test_add_hint_and_eviction(monkeypatch):
+    """
+    Test that HintedHandoff properly evicts oldest hints when MAX_HINTS limit is exceeded.
+
+    This test verifies:
+    - HintedHandoff stores hints up to MAX_HINTS capacity
+    - When capacity is exceeded, the oldest hint is evicted (FIFO behavior)
+    - Each hint contains a timestamp field of type float
+    - monkeypatch is a pytest fixture that temporarily replaces MAX_HINTS with 3 for this test
+
+    monkeypatch: A pytest fixture that allows temporary modification of module attributes,
+    functions, or environment variables during test execution. Changes are automatically
+    reverted after the test completes.
+    """
     hh = hinted_handoff.HintedHandoff('http://self')
     # shrink MAX_HINTS for test
     monkeypatch.setattr(hinted_handoff, 'MAX_HINTS', 3)
