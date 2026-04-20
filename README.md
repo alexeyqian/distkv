@@ -11,6 +11,8 @@ Vector clocks ✅
 Quorum R/W ✅
 Read repair ✅
 Ownership-based routing ✅
+Hinted handoff ✅
+Gossip failure detection ✅
 
 Additional modules:
 

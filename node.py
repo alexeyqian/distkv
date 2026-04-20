@@ -9,12 +9,14 @@ from vector_clock import VectorClock
 from hash_ring import ConsistentHashRing
 from quorum import merge_versions, read_repair
 from hinted_handoff import HintedHandoff
+from gossip import GossipNode
 
 app = FastAPI()
 
 store = KVStore()
 ring = ConsistentHashRing(config.get_all_nodes(), virtual_nodes=5)
 hinted_handoff = HintedHandoff(config.get_self_url())
+gossip = GossipNode(config.get_self_url(), config.get_peers())
 
 class PutRequest(BaseModel):
     key: str
@@ -29,6 +31,7 @@ class ReplicateRequest(BaseModel):
 @app.on_event("startup")
 async def start_background_tasks():
     asyncio.create_task(hinted_handoff.replay_loop())
+    asyncio.create_task(gossip.gossip_loop())
 
 @app.get('/hints')
 def get_hints():
@@ -56,7 +59,11 @@ async def put(req: PutRequest):
     # is it a problem if we increment the clock before routing? maybe not, since the client will get the updated vc and can use it for causality tracking.
     vc.increment(config.NODE_ID)
     
-    target_nodes = ring.get_n_nodes(req.key, config.REPLICATION_FACTOR)
+    alive_nodes = gossip.get_alive_nodes()
+    target_nodes = [
+        node for node in ring.get_n_nodes(req.key, config.REPLICATION_FACTOR)
+        if node in alive_nodes
+    ]
 
     # forward to correct node
     # Only responsible nodes coordinate the write
@@ -85,7 +92,8 @@ async def put(req: PutRequest):
                         'value': req.value,
                         'vc': vc.copy()})
         except:
-            hinted_handoff.add_hint(node, req.key, req.value, vc.copy())
+            if node not in gossip.get_alive_nodes():
+                hinted_handoff.add_hint(node, req.key, req.value, vc.copy())
             return None
     #replicate to others
     tasks = [write_to(node) for node in target_nodes]
@@ -141,3 +149,17 @@ async def get(key: str):
 @app.get("/local_get/{key}")
 def local_get(key: str):
     return {'versions': store.get(key)}
+
+@app.post('/gossip')
+async def gossip_endpoint(req:dict):
+    sender = req['from']
+
+    #mark sender alive
+    gossip.mark_alive(sender)
+    #merge membership tables
+    gossip.merge(req['members'])
+    return {'members': gossip.members}
+
+@app.get('/members')
+def get_members():
+    return gossip.members
