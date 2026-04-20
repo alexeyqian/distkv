@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import httpx
+import aysncio
 
 from store import KVStore
 from not_used.cluster import Cluster
@@ -26,7 +27,8 @@ class ReplicateRequest(BaseModel):
     value: str
     timestamp: int
     
-# client write
+# client write - PUT -> owner node -> replicas
+# data ownership defines coordination authority, this is very important distributed systems principle.
 @app.post('/put')
 async def put(req: PutRequest):
     """
@@ -43,18 +45,19 @@ async def put(req: PutRequest):
         dict: Response with status 'ok' and the vector clock used for the write.
     """
     # if this is a client request -> generate timestamp
-    if req.vc is None:
-        vc = VectorClock()
-    
-    else: # forword ??
-        vc = VectorClock(req.vc)
-    
+    vc = VectorClock(req.vc or {})
+    # is it a problem if we increment the clock before routing? maybe not, since the client will get the updated vc and can use it for causality tracking.
     vc.increment(config.NODE_ID)
     
-    target_nodes = ring.get_n_nodes(req.key, 2) #replication factor = 2
+    target_nodes = ring.get_n_nodes(req.key, config.REPLICATION_FACTOR)
+
     # forward to correct node
+    # Only responsible nodes coordinate the write
+    # ONLY certain nodes "own" a key for consistent hasing.
     if config.get_self_url() not in target_nodes:
         async with httpx.AsyncClient() as client:
+            # improve later: Instead of always forwarding to target_nodes[0]:
+            # fallback coordinator if the first one is down, or even better: forward to all target nodes and use the first successful response as coordinator.
             return await client.post(
                 f"{target_nodes[0]}/put",
                 json={
@@ -64,20 +67,26 @@ async def put(req: PutRequest):
 
     # local write
     store.put(req.key, req.value, vc.copy())
-    #replicate to others
-    async with httpx.AsyncClient() as client:
-        for node in target_nodes:
-            if node != config.get_self_url():
-                try:
-                    await client.post(f"{node}/replicate", json={
+    
+    async def write_to(node):
+        try:
+            async with httpx.AsyncClient() as client:
+                return await client.post(
+                    f"{node}/replicate",
+                    json={
                         'key': req.key,
                         'value': req.value,
-                        'vc': vc.copy()
-                    })
-                except:
-                    pass
-    
-    return {'status': 'ok', 'vc': vc.copy()}
+                        'vc': vc.copy()})
+        except:
+            return None
+    #replicate to others
+    tasks = [write_to(node) for node in target_nodes]
+    results = await asyncio.gather(*tasks)
+    success = sum(1 for r in results if r is not None)
+    if success >= config.QURORUM_W:
+        return {'status': 'ok', 'acks': success}
+    else:
+        return {'status': 'fail', 'acks': success}
 
 # internal replication
 @app.post('/replicate')
@@ -85,21 +94,80 @@ async def replicate(req: dict):
     store.put(req['key'], req['value'], req['vc'])
     return {'status': 'replicated'}
 
-# read
+# read GET -> owner node -> replicas
 @app.get('/get/{key}')
 async def get(key: str):
-    target_nodes = ring.get_n_nodes(key, 2)
-    if config.get_self_url() in target_nodes:
-        val = store.get(key)
-        if val is not None:
-            return {'versions': val}
-    # falback to other nodes
+    target_nodes = ring.get_n_nodes(key, config.REPLICATION_FACTOR)
+    # enforce coordinator ownership
+    if config.get_self_url() not in target_nodes:
+        # forward to one of the responsible nodes
+        async with httpx.AsyncClient() as client:
+            for node in target_nodes:
+                try:
+                    return await client.get(f"{node}/get/{key}")
+                except:
+                    continue
+            return {'error': "no availble coordinator"}
+
+    # this node is a coordinator, read locally and from other replicas, then merge versions
+    async def read_from(node):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{node}/local_get/{key}")
+                return resp.json()
+        except:
+            return None
+    tasks = [read_from(node) for node in target_nodes]
+    results = await asyncio.gather(*tasks)
+    responses = [r for r in results if r is not None]
+    #quorum check
+    if(len(responses) < config.QUORUM_R):
+        return {'error': 'not enough replicas available'}
+    # merge versions using vector clock
+    merged = merge_versions([r['versions'] for r in responses])
+    # read repair (only coordinator does this)
+    await read_repair(key, merged, responses, target_nodes)
+    return {'versions': merged}
+
+# this avoids recursive quorum calls
+@app.get("/local_get/{key}")
+def local_get(key: str):
+    return {'versions': store.get(key)}
+
+def merge_versions(versions_list):
+    merged = []
+    for versions in versions_list:
+        for v in versions:
+            keep = True
+            for existing in merged:
+                cmp = VectorClock.compare(v['vc'], existing['vc'])
+                if cmp == 1: # v is newer than existing, replace it
+                    merged.remove(existing)
+                elif cmp == -1: # v is older than existing, ignore it
+                    keep = False
+                    break
+            if keep:
+                merged.append(v)
+    return merged
+
+# if replicas disagree -> fix them during read
+# scenario: node a: x=1, node b: x=1, node c: x=old
+# client reads from a + c: detect mismatch, replair c automatically.
+async def read_repair(key, merged, responses, nodes):
     async with httpx.AsyncClient() as client:
-        for node in target_nodes:
-            try:
-                resp = await client.get(f"{node}/get/{key}")
-                if resp.json().get('versions') is not None:
-                    return resp.json()
-            except:
-                pass
-    return {'versions': None}
+        for node, resp in zip(nodes, responses):
+            if resp is None:
+                continue
+            if resp['versions'] != merged:
+                # node is stale -> update it
+                for v in merged:
+                    try:
+                        await client.post(
+                            f"{node}/replicate",
+                            json={
+                                'key': key,
+                                'value': v['value'],
+                                'vc': v['vc']})
+                    except:
+                        continue
+        

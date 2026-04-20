@@ -7,6 +7,11 @@ PEERS = [
     "http://localhost:8003",
 ]
 
+# QUORUM_R + QUORUM_W > REPLICATION_FACTOR to ensure consistency (for single key)
+REPLICATION_FACTOR = 3
+QURORUM_W = 2
+QURORUM_R = 2
+
 def get_all_nodes():
     return PEERS.append(SELF_URL)
 
