@@ -9,11 +9,12 @@ PEERS = [
 
 # QUORUM_R + QUORUM_W > REPLICATION_FACTOR to ensure consistency (for single key)
 REPLICATION_FACTOR = 3
-QURORUM_W = 2
-QURORUM_R = 2
+QUORUM_W = 2
+QUORUM_R = 2
 
 def get_all_nodes():
-    return PEERS.append(SELF_URL)
+    # return a new list with peers + self without mutating the global PEERS
+    return PEERS + [SELF_URL]
 
 def get_peers():
     return PEERS

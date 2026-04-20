@@ -2,10 +2,15 @@
 
 A simple distributed system demonstration implemented in Python.
 
-This project provides two core building blocks commonly used in distributed systems:
+This project provides core building blocks commonly used in distributed systems:
 
-- Vector clocks: causal versioning for tracking concurrent updates across nodes (vector_clock.py)
-- Consistent hash ring: simple consistent hashing with virtual nodes for key distribution (hash_ring.py)
+Features:
+Consistent hashing ✅
+Replication ✅
+Vector clocks ✅
+Quorum R/W ✅
+Read repair ✅
+Ownership-based routing ✅
 
 Additional modules:
 
@@ -23,3 +28,10 @@ Getting started
 License
 
 See LICENSE file in the repository.
+
+Some Details:
+1. What is Hinted Handoff?
+When a replica is down:
+Write → intended node is unavailable
+→ store "hint" locally
+→ replay later when node recovers

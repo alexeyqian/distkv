@@ -1,21 +1,20 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import httpx
-import aysncio
+import asyncio
 
+import config
 from store import KVStore
-from not_used.cluster import Cluster
-from not_used.clock import LamportClock
 from vector_clock import VectorClock
 from hash_ring import ConsistentHashRing
-import config
+from quorum import merge_versions, read_repair
+from hinted_handoff import HintedHandoff
 
 app = FastAPI()
 
 store = KVStore()
-cluster = Cluster(config.get_peers())
-clock = LamportClock()
 ring = ConsistentHashRing(config.get_all_nodes(), virtual_nodes=5)
+hinted_handoff = HintedHandoff(config.get_self_url())
 
 class PutRequest(BaseModel):
     key: str
@@ -26,7 +25,15 @@ class ReplicateRequest(BaseModel):
     key: str
     value: str
     timestamp: int
-    
+
+@app.on_event("startup")
+async def start_background_tasks():
+    asyncio.create_task(hinted_handoff.replay_loop())
+
+@app.get('/hints')
+def get_hints():
+    return {'hints': hinted_handoff.hints}
+
 # client write - PUT -> owner node -> replicas
 # data ownership defines coordination authority, this is very important distributed systems principle.
 @app.post('/put')
@@ -78,6 +85,7 @@ async def put(req: PutRequest):
                         'value': req.value,
                         'vc': vc.copy()})
         except:
+            hinted_handoff.add_hint(node, req.key, req.value, vc.copy())
             return None
     #replicate to others
     tasks = [write_to(node) for node in target_nodes]
@@ -133,41 +141,3 @@ async def get(key: str):
 @app.get("/local_get/{key}")
 def local_get(key: str):
     return {'versions': store.get(key)}
-
-def merge_versions(versions_list):
-    merged = []
-    for versions in versions_list:
-        for v in versions:
-            keep = True
-            for existing in merged:
-                cmp = VectorClock.compare(v['vc'], existing['vc'])
-                if cmp == 1: # v is newer than existing, replace it
-                    merged.remove(existing)
-                elif cmp == -1: # v is older than existing, ignore it
-                    keep = False
-                    break
-            if keep:
-                merged.append(v)
-    return merged
-
-# if replicas disagree -> fix them during read
-# scenario: node a: x=1, node b: x=1, node c: x=old
-# client reads from a + c: detect mismatch, replair c automatically.
-async def read_repair(key, merged, responses, nodes):
-    async with httpx.AsyncClient() as client:
-        for node, resp in zip(nodes, responses):
-            if resp is None:
-                continue
-            if resp['versions'] != merged:
-                # node is stale -> update it
-                for v in merged:
-                    try:
-                        await client.post(
-                            f"{node}/replicate",
-                            json={
-                                'key': key,
-                                'value': v['value'],
-                                'vc': v['vc']})
-                    except:
-                        continue
-        
