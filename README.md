@@ -8,11 +8,44 @@ Features:
 Consistent hashing ✅
 Replication ✅
 Vector clocks ✅
-Quorum R/W ✅
-Read repair ✅
+Quorum R/W (prevents bad writes) ✅
+Read repair (fixes on read) ✅
 Ownership-based routing ✅
-Hinted handoff ✅
+Hinted handoff (fixes during downtime) ✅
 Gossip failure detection ✅
+
+Current system (Dynamo-style like Amazon DynamoDB):
+- Any side of a partition can accept writes
+- Each side evolves independently
+- Conflicts are resolved later (vector clocks)
+👉 Result: split-brain is allowed by design
+Consistency ❌
+Availability ✅
+eventually consistent + self-healing + failure-aware system
+
+(
+   Raft avoids split-brain by refusing to operate without a majority, and what it gives up is availability during partitions.
+   Partition → stop if no majority
+   Consistency ✅
+   Availability ❌
+
+   Split-brain is not prevented by magic.
+   It’s prevented by: ❗ refusing to act without enough agreement
+)
+
+AP mindeset: (allow split-brain, like dynamodb, cassandra)
+system must always respond
+fix inconsistencies later
+
+CP mindset: (avoid split-brain, such as etcd and ZooKeeper)
+system must always be correct
+refuse to respond if uncertain
+
+KVStore:
+- append-only log (like real systems)
+- in-memory index
+- recovery on restart
+- simple compaction (optional)
 
 Additional modules:
 
@@ -37,3 +70,10 @@ When a replica is down:
 Write → intended node is unavailable
 → store "hint" locally
 → replay later when node recovers
+
+what is merkle tree sync?
+what is ataptive quorum?
+Add network partition simulator
+add backpressure / rate limiting
+change network protocol?
+

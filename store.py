@@ -1,9 +1,18 @@
+import os
+import json
+import threading
 from vector_clock import VectorClock
+
 class KVStore:
-    def __init__(self):
+    def __init__(self, file_path='kv.log'):
+        self.file_path = file_path
+        self.lock = threading.Lock()
         self.data = {} # key -> list of versions
-        self.lock = None # optional threading.Lock()
-    
+        
+        # open file in append+read mode, create if not exists
+        self.file = open(self.file_path, 'a+', buffering=1)
+        self._load() # rebuild state from disk
+
     def put(self, key, value, vc: VectorClock):
         new_version = {'value': value, 'vc': vc}
         if key not in self.data:

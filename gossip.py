@@ -2,6 +2,13 @@ import random
 import time
 import asyncio
 import httpx
+"""
+What Gossip does:
+- picks a random peer
+- exchanges membership states
+- updates its view of the cluster
+overtime all nodes converge to same view
+"""
 
 class GossipNode:
     def __init__(self, self_url, peers):
